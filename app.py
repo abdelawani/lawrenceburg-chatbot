@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter
@@ -10,7 +8,8 @@ from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 
-# ── 1) Your six source URLs ─────────────────────────────────────────────
+# ── 1) Our source URLs ─────────────────────────────────────────────
+
 SOURCES = {
     "Lawrence County Extension":
         "https://lawrencecountytn.gov/government/departments/agricultural-extension/",
@@ -20,8 +19,6 @@ SOURCES = {
         "https://utia.tennessee.edu/",
     "TN State Univ.":
         "https://www.tnstate.edu/",
-    "TN Government":
-        "https://www.tn.gov/",
     "TN Ag. Dept.":
         "https://www.tn.gov/agriculture.html",
 }
