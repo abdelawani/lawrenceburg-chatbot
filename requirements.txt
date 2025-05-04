@@ -1,5 +1,3 @@
-# requirements.txt
-
 streamlit
 requests
 trafilatura
