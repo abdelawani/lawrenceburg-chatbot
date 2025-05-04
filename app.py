@@ -50,8 +50,7 @@ def chunk_text(text, chunk_size=250, overlap=50):
     start = 0
     while start < len(words):
         end = start + chunk_size
-        chunk = " ".join(words[start:end])
-        chunks.append(chunk)
+        chunks.append(" ".join(words[start:end]))
         start += chunk_size - overlap
     return chunks
 
@@ -82,17 +81,23 @@ def build_vector_index():
 
     for name, url in SOURCES.items():
         try:
-            raw = trafilatura.fetch_url(url, request_timeout=10)
+            # FETCH
+            raw = trafilatura.fetch_url(url)   # <-- removed request_timeout
             if not raw:
                 st.warning(f"No content fetched from {url}")
                 continue
 
-            cleaned = trafilatura.extract(raw, include_comments=False,
-                                         include_tables=False)
+            # CLEAN
+            cleaned = trafilatura.extract(
+                raw,
+                include_comments=False,
+                include_tables=False
+            )
             if not cleaned:
                 st.warning(f"Couldn’t extract text from {url}")
                 continue
 
+            # CHUNK
             for chunk in chunk_text(cleaned):
                 texts.append(chunk)
                 metas.append({"source": name, "url": url})
@@ -100,11 +105,18 @@ def build_vector_index():
         except Exception as e:
             st.warning(f"Error fetching {url}: {e}")
 
-    # embed all at once
-    embeddings = embed_model.encode(texts, show_progress_bar=True)
+    if not texts:
+        st.error("No texts to index. Check your sources or scraping logic.")
+        st.stop()
+
+    # EMBED
+    embs = embed_model.encode(texts, show_progress_bar=True)
+    embeddings = np.array(embs, dtype="float32")
     dim = embeddings.shape[1]
+
+    # INDEX
     index = faiss.IndexFlatL2(dim)
-    index.add(np.array(embeddings, dtype="float32"))
+    index.add(embeddings)
 
     return index, texts, metas
 
@@ -118,7 +130,6 @@ def retrieve(query, index, texts, metas, k=5):
 # ── 8) Answer generation with expanded prompt ──────────────────────────
 def generate_answer(query, contexts):
     qa = load_qa_pipeline()
-    # build a single context string
     ctx_str = "\n\n".join(
         [f"[{m['source']}] {txt}" for txt, m in contexts]
     )
@@ -147,7 +158,6 @@ def main():
         "in Lawrence County, TN."
     )
 
-    # build/load index once
     index, texts, metas = build_vector_index()
 
     query = st.text_input("Your question here…")
