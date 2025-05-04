@@ -19,8 +19,7 @@ SOURCES = {
         "https://utia.tennessee.edu/",
     "TN State Univ.":
         "https://www.tnstate.edu/",
-    "TN Ag. Dept.":
-        "https://www.tn.gov/agriculture.html",
+    
 }
 
 # ── 2) Session with retry & browser UA ──────────────────────────────────
