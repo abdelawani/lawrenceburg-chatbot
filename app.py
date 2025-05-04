@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 
-# ── 1) Your six source URLs ─────────────────────────────────────────────
+# ── 1) Your source URLs ─────────────────────────────────────────────────
 SOURCES = {
     "Lawrence County Extension":
         "https://lawrencecountytn.gov/government/departments/agricultural-extension/",
@@ -41,7 +41,7 @@ def make_session():
     session.mount("https://", HTTPAdapter(max_retries=retries))
     return session
 
-# ── 3) Chunking helper (approx. 250 words / 50‑word overlap) ───────────
+# ── 3) Chunker (≈250 words, 50‑word overlap) ────────────────────────────
 def chunk_text(text, chunk_size=250, overlap=50):
     words = text.split()
     chunks = []
@@ -52,15 +52,14 @@ def chunk_text(text, chunk_size=250, overlap=50):
         start += chunk_size - overlap
     return chunks
 
-# ── 4) Load & cache embedding model ────────────────────────────────────
+# ── 4) Load & cache the faster MiniLM embedding model ──────────────────
 @st.cache_resource(show_spinner=False)
 def load_embedding_model():
-    return SentenceTransformer("all-mpnet-base-v2")
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-# ── 5) Load & cache RAG LLM pipeline (swapped to Flan‑T5‑Base) ─────────
+# ── 5) Load & cache RAG LLM (Flan‑T5‑Base) ─────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_qa_pipeline():
-    # Use the larger base model for richer, more coherent answers on CPU
     model_name = "google/flan-t5-base"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model     = AutoModelForSeq2SeqLM.from_pretrained(model_name)
@@ -68,17 +67,19 @@ def load_qa_pipeline():
         "text2text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_length=768,    # allow longer outputs
-        do_sample=True,    # enable sampling for creativity
-        temperature=0.7,   # add a bit of “human” randomness
+        max_length=768,
+        do_sample=True,
+        temperature=0.7,
     )
 
-# ── 6) Build FAISS index over all chunks ───────────────────────────────
+# ── 6) Build FAISS index with chunk caps ───────────────────────────────
 @st.cache_resource(show_spinner=False)
 def build_vector_index():
-    sess = make_session()
-    embed_model = load_embedding_model()
-    texts, metas = [], []
+    sess           = make_session()
+    embed_model    = load_embedding_model()
+    texts, metas   = [], []
+    max_per_site   = 20
+    total_limit    = 150
 
     for name, url in SOURCES.items():
         try:
@@ -96,51 +97,55 @@ def build_vector_index():
                 st.warning(f"Couldn’t extract text from {url}")
                 continue
 
-            for chunk in chunk_text(cleaned):
+            chunks = chunk_text(cleaned)
+            for chunk in chunks[:max_per_site]:
                 texts.append(chunk)
                 metas.append({"source": name, "url": url})
+                if len(texts) >= total_limit:
+                    break
+
+            if len(texts) >= total_limit:
+                break
 
         except Exception as e:
             st.warning(f"Error fetching {url}: {e}")
+            continue
 
     if not texts:
-        st.error("No texts to index. Check your sources or scraping logic.")
+        st.error("No texts to index. Check sources or scraping.")
         st.stop()
 
-    embs = embed_model.encode(texts, show_progress_bar=True)
+    embs       = embed_model.encode(texts, show_progress_bar=False)
     embeddings = np.array(embs, dtype="float32")
-    dim = embeddings.shape[1]
-
-    index = faiss.IndexFlatL2(dim)
+    dim        = embeddings.shape[1]
+    index      = faiss.IndexFlatL2(dim)
     index.add(embeddings)
 
     return index, texts, metas
 
-# ── 7) Retrieval ───────────────────────────────────────────────────────
+# ── 7) Retrieve top‑k chunks ────────────────────────────────────────────
 def retrieve(query, index, texts, metas, k=5):
     embed_model = load_embedding_model()
-    q_emb = embed_model.encode([query])
-    _, I = index.search(np.array(q_emb, dtype="float32"), k)
+    q_emb       = embed_model.encode([query])
+    _, I        = index.search(np.array(q_emb, dtype="float32"), k)
     return [(texts[i], metas[i]) for i in I[0]]
 
-# ── 8) Answer generation with expanded prompt ──────────────────────────
+# ── 8) Generate answer with expanded prompt ────────────────────────────
 def generate_answer(query, contexts):
-    qa = load_qa_pipeline()
-    ctx_str = "\n\n".join(
-        [f"[{m['source']}] {txt}" for txt, m in contexts]
-    )
+    qa    = load_qa_pipeline()
+    ctxs  = "\n\n".join(f"[{m['source']}] {txt}" for txt, m in contexts)
     prompt = f"""
 You are the Lawrenceburg County Extension virtual agent.
-Use ONLY the context below to answer the question in a numbered list.
-After each step, cite the source name in brackets.
+Use ONLY the context below to answer in numbered steps.
+Cite the source in brackets after each step.
 
 CONTEXT:
-{ctx_str}
+{ctxs}
 
 QUESTION:
 {query}
 
-ANSWER (numbered steps, cite source):
+ANSWER:
 """
     out = qa(prompt)[0]["generated_text"]
     return out.strip()
@@ -158,7 +163,7 @@ def main():
 
     query = st.text_input("Your question here…")
     if st.button("Ask") and query:
-        with st.spinner("Retrieving relevant info…"):
+        with st.spinner("Retrieving…"):
             contexts = retrieve(query, index, texts, metas, k=5)
 
         st.markdown("**🔍 Retrieved contexts:**")
@@ -166,7 +171,7 @@ def main():
             snippet = txt[:200].replace("\n", " ") + "…"
             st.markdown(f"{i}. [{m['source']}]({m['url']}) — “{snippet}”")
 
-        with st.spinner("Generating your answer…"):
+        with st.spinner("Generating answer…"):
             answer = generate_answer(query, contexts)
 
         st.markdown("**💡 Answer:**")
