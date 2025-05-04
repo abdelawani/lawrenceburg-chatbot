@@ -6,6 +6,6 @@ trafilatura
 sentence-transformers
 faiss-cpu
 transformers
+bitsandbytes
+accelerate
 urllib3
-huggingface_hub
-llama-cpp-python
