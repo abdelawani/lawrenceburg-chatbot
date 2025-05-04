@@ -1,3 +1,5 @@
+# app.py
+
 import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter
@@ -8,8 +10,7 @@ from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 
-# ── 1) Our source URLs ─────────────────────────────────────────────
-
+# ── 1) Your six source URLs ─────────────────────────────────────────────
 SOURCES = {
     "Lawrence County Extension":
         "https://lawrencecountytn.gov/government/departments/agricultural-extension/",
@@ -19,7 +20,8 @@ SOURCES = {
         "https://utia.tennessee.edu/",
     "TN State Univ.":
         "https://www.tnstate.edu/",
-    
+    "TN Ag. Dept.":
+        "https://www.tn.gov/agriculture.html",
 }
 
 # ── 2) Session with retry & browser UA ──────────────────────────────────
@@ -55,17 +57,20 @@ def chunk_text(text, chunk_size=250, overlap=50):
 def load_embedding_model():
     return SentenceTransformer("all-mpnet-base-v2")
 
-# ── 5) Load & cache RAG LLM pipeline ───────────────────────────────────
+# ── 5) Load & cache RAG LLM pipeline (swapped to Flan‑T5‑Base) ─────────
 @st.cache_resource(show_spinner=False)
 def load_qa_pipeline():
-    model_name = "google/flan-t5-small"
+    # Use the larger base model for richer, more coherent answers on CPU
+    model_name = "google/flan-t5-base"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    model     = AutoModelForSeq2SeqLM.from_pretrained(model_name)
     return pipeline(
         "text2text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_length=512,
+        max_length=768,    # allow longer outputs
+        do_sample=True,    # enable sampling for creativity
+        temperature=0.7,   # add a bit of “human” randomness
     )
 
 # ── 6) Build FAISS index over all chunks ───────────────────────────────
@@ -77,13 +82,11 @@ def build_vector_index():
 
     for name, url in SOURCES.items():
         try:
-            # FETCH
-            raw = trafilatura.fetch_url(url)   # <-- removed request_timeout
+            raw = trafilatura.fetch_url(url)
             if not raw:
                 st.warning(f"No content fetched from {url}")
                 continue
 
-            # CLEAN
             cleaned = trafilatura.extract(
                 raw,
                 include_comments=False,
@@ -93,7 +96,6 @@ def build_vector_index():
                 st.warning(f"Couldn’t extract text from {url}")
                 continue
 
-            # CHUNK
             for chunk in chunk_text(cleaned):
                 texts.append(chunk)
                 metas.append({"source": name, "url": url})
@@ -105,12 +107,10 @@ def build_vector_index():
         st.error("No texts to index. Check your sources or scraping logic.")
         st.stop()
 
-    # EMBED
     embs = embed_model.encode(texts, show_progress_bar=True)
     embeddings = np.array(embs, dtype="float32")
     dim = embeddings.shape[1]
 
-    # INDEX
     index = faiss.IndexFlatL2(dim)
     index.add(embeddings)
 
