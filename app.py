@@ -1,6 +1,5 @@
 # app.py
 
-import os
 import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter
@@ -9,10 +8,9 @@ import trafilatura
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import faiss
-from huggingface_hub import hf_hub_download
-from llama_cpp import Llama
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
-# ── 1) Source URLs ───────────────────────────────────────────────────────
+# ── 1) Sources ───────────────────────────────────────────────────────────
 SOURCES = {
     "Lawrence County Extension":
         "https://lawrencecountytn.gov/government/departments/agricultural-extension/",
@@ -26,80 +24,63 @@ SOURCES = {
         "https://www.tn.gov/agriculture.html",
 }
 
-# ── 2) HTTP session with retries & browser UA ────────────────────────────
+# ── 2) HTTP session w/ retries & browser UA ─────────────────────────────
 def make_session():
-    session = requests.Session()
-    session.headers.update({
+    s = requests.Session()
+    s.headers.update({
         "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/114.0.0.0 Safari/537.36"
     })
-    retries = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504]
-    )
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    return session
+    retries = Retry(total=3, backoff_factor=1,
+                    status_forcelist=[429,500,502,503,504])
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    return s
 
-# ── 3) Simple sliding‑window chunker (≈250 words, 50‑word overlap) ──────
+# ── 3) Chunker (≈250 words, 50 overlap) ─────────────────────────────────
 def chunk_text(text, chunk_size=250, overlap=50):
-    words = text.split()
-    chunks = []
-    i = 0
+    words, chunks, i = text.split(), [], 0
     while i < len(words):
-        chunks.append(" ".join(words[i:i+chunk_size]))
+        chunks.append(" ".join(words[i : i+chunk_size]))
         i += chunk_size - overlap
     return chunks
 
-# ── 4) Fast embedding model (MiniLM) ───────────────────────────────────
+# ── 4) Fast embedding model ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def load_embedding_model():
+def load_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
-# ── 5) Load & cache quantized Llama 2‑7B‑Chat pipeline ─────────────────
+# ── 5) Load & cache chat‑optimized Llama 2‑7B on GPU ─────────────────────
 @st.cache_resource(show_spinner=False)
-def load_chat_model():
-    # **You must host your GGUF** on HF Hub under your repo (or adjust repo_id)
-    repo_id   = "your-hf-username/llama2-7b-chat-gguf"
-    filename  = "llama2-7b-chat-q4_0.gguf"
-    models_dir = "models"
-    local_path = os.path.join(models_dir, filename)
-
-    # 1) download if not already present
-    if not os.path.exists(local_path):
-        os.makedirs(models_dir, exist_ok=True)
-        hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            local_dir=models_dir,
-            repo_type="model"
-        )
-
-    # 2) load quantized Llama 2 on CPU
-    llm = Llama(
-        model_path=local_path,
-        n_ctx=2048,
-        n_threads=4,
+def load_qa_pipeline():
+    model_id = "meta-llama/Llama-2-7b-chat-hf"
+    # 1) tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    # 2) model w/ 8‑bit and auto device mapping
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        device_map="auto",
+        load_in_8bit=True
+    )
+    # 3) HF pipeline
+    return pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=256,
+        do_sample=True,
         temperature=0.7,
+        top_p=0.9
     )
 
-    # 3) wrap to unify interface
-    def chat_fn(prompt: str) -> str:
-        resp = llm(prompt, max_tokens=256)
-        return resp["choices"][0]["text"].strip()
-
-    return chat_fn
-
-# ── 6) Build FAISS index with chunk caps ───────────────────────────────
+# ── 6) Build FAISS index (capped chunks) ────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def build_vector_index():
-    sess         = make_session()
-    embed_model  = load_embedding_model()
+    sess       = make_session()
+    embedder   = load_embedder()
     texts, metas = [], []
-    per_site_cap = 20
-    total_cap    = 150
+    per_site, total = 20, 150
 
     for name, url in SOURCES.items():
         try:
@@ -107,94 +88,85 @@ def build_vector_index():
             if not raw:
                 st.warning(f"No content from {url}")
                 continue
-
             cleaned = trafilatura.extract(raw,
                                           include_comments=False,
                                           include_tables=False)
             if not cleaned:
-                st.warning(f"Couldn’t extract text from {url}")
+                st.warning(f"Extract failed for {url}")
                 continue
 
-            chunks = chunk_text(cleaned)
-            for chunk in chunks[:per_site_cap]:
+            for chunk in chunk_text(cleaned)[:per_site]:
                 texts.append(chunk)
                 metas.append({"source": name, "url": url})
-                if len(texts) >= total_cap:
+                if len(texts) >= total:
                     break
-
-            if len(texts) >= total_cap:
+            if len(texts) >= total:
                 break
 
         except Exception as e:
-            st.warning(f"Error fetching {url}: {e}")
-            continue
+            st.warning(f"{name}→{e}")
 
     if not texts:
-        st.error("No texts to index. Check your SOURCES or scraping.")
+        st.error("No text to index. Check SOURCES or scraper.")
         st.stop()
 
-    embeddings = embed_model.encode(texts, show_progress_bar=False)
-    embeddings = np.array(embeddings, dtype="float32")
-    dim        = embeddings.shape[1]
-    index      = faiss.IndexFlatL2(dim)
-    index.add(embeddings)
+    embs = embedder.encode(texts, show_progress_bar=False)
+    embs = np.array(embs, dtype="float32")
+    idx  = faiss.IndexFlatL2(embs.shape[1])
+    idx.add(embs)
+    return idx, texts, metas
 
-    return index, texts, metas
-
-# ── 7) Retrieve top‑k chunks ────────────────────────────────────────────
-def retrieve(query, index, texts, metas, k=5):
-    embed_model = load_embedding_model()
-    q_emb       = embed_model.encode([query])
-    _, I        = index.search(np.array(q_emb, dtype="float32"), k)
+# ── 7) Retrieval ────────────────────────────────────────────────────────
+def retrieve(query, idx, texts, metas, k=5):
+    embedder = load_embedder()
+    q_emb     = embedder.encode([query])
+    _, I      = idx.search(np.array(q_emb, dtype="float32"), k)
     return [(texts[i], metas[i]) for i in I[0]]
 
-# ── 8) Generate answer via quantized chat model ───────────────────────
+# ── 8) Generate answer ─────────────────────────────────────────────────
 def generate_answer(query, contexts):
-    chat = load_chat_model()
-    ctxs = "\n\n".join(f"[{m['source']}] {txt}" for txt, m in contexts)
+    qa = load_qa_pipeline()
+    ctx = "\n\n".join(f"[{m['source']}] {txt}" for txt, m in contexts)
     prompt = f"""
-You are Sam, a friendly UT Extension agronomist based in Lawrence County, TN.
-Use ONLY the context below to give a step-by-step answer. Cite the source
-in brackets after each step.
+You are Sam, a friendly UT Extension agronomist located in Lawrence County,
+TN. Use ONLY the context below to craft a clear, numbered step-by-step answer.
+Cite the source in brackets after each step.
 
 CONTEXT:
-{ctxs}
+{ctx}
 
 QUESTION:
 {query}
 
 ANSWER:
 """
-    return chat(prompt)
+    return qa(prompt)[0]["generated_text"].strip()
 
-# ── 9) Streamlit UI ─────────────────────────────────────────────────────
+# ── 9) Streamlit UI ────────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="Lawrenceburg Extension Chatbot")
     st.title("🌾 Lawrenceburg County Extension Chatbot")
     st.write(
-        "Ask questions about Extension services, resources, and programs "
-        "in Lawrence County, TN."
+        "Ask about Extension services, resources, and programs in Lawrence County, TN."
     )
 
-    # build (or load) index once
-    index, texts, metas = build_vector_index()
+    idx, texts, metas = build_vector_index()
 
-    query = st.text_input("Your question here…")
-    if st.button("Ask") and query:
+    q = st.text_input("Your question here…")
+    if st.button("Ask") and q:
         with st.spinner("Retrieving…"):
-            contexts = retrieve(query, index, texts, metas, k=5)
+            ctxs = retrieve(q, idx, texts, metas, k=5)
 
         st.markdown("**🔍 Retrieved contexts:**")
-        for i, (txt, m) in enumerate(contexts, start=1):
-            snippet = txt[:200].replace("\n", " ") + "…"
+        for i,(txt,m) in enumerate(ctxs,1):
+            snippet = txt[:200].replace("\n"," ") + "…"
             st.markdown(f"{i}. [{m['source']}]({m['url']}) — “{snippet}”")
 
         with st.spinner("Generating answer…"):
-            answer = generate_answer(query, contexts)
+            ans = generate_answer(q, ctxs)
 
         st.markdown("**💡 Answer:**")
-        st.write(answer)
+        st.write(ans)
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
