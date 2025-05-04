@@ -1,3 +1,5 @@
+# requirements.txt
+
 streamlit
 requests
 trafilatura
@@ -5,3 +7,5 @@ sentence-transformers
 faiss-cpu
 transformers
 urllib3
+huggingface_hub
+llama-cpp-python
