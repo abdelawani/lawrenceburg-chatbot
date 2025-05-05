@@ -1,7 +1,9 @@
 # code/requirements.txt
-gradio
-requests
-trafilatura
-sentence-transformers
-faiss-cpu
-transformers
+ gradio
+ requests
+ trafilatura
+ sentence-transformers
+ faiss-cpu
+ transformers
+ accelerate
+ bitsandbytes
