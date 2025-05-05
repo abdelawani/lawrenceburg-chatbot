@@ -1,7 +1,7 @@
-streamlit
+# code/requirements.txt
+gradio
 requests
 trafilatura
 sentence-transformers
 faiss-cpu
 transformers
-colabcode
