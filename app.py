@@ -36,7 +36,7 @@ def make_session():
     s.mount("https://", HTTPAdapter(max_retries=retries))
     return s
 
-# 3) Chunker (~250 words, 50 overlap)
+# 3) Simple chunker (≈250 words, 50 overlap)
 def chunk_text(text, chunk_size=250, overlap=50):
     words, chunks, i = text.split(), [], 0
     while i < len(words):
@@ -47,10 +47,10 @@ def chunk_text(text, chunk_size=250, overlap=50):
 # 4) Embedding model
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-# 5) Chat model pipeline (Llama 2‑Chat via HF)
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
-model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-2-7b-chat-hf",
+# 5) Chat‑optimized Falcon 7B‑Instruct
+tokenizer = AutoTokenizer.from_pretrained("tiiuae/falcon-7b-instruct")
+model     = AutoModelForCausalLM.from_pretrained(
+    "tiiuae/falcon-7b-instruct",
     device_map="auto",
     load_in_8bit=True
 )
@@ -64,7 +64,7 @@ chat_pipe = pipeline(
     top_p=0.9
 )
 
-# 6) Build FAISS index (cached in memory)
+# 6) Build FAISS index (cache in memory)
 _index, _texts, _metas = None, None, None
 def build_index():
     global _index, _texts, _metas
@@ -92,7 +92,7 @@ def build_index():
             continue
 
     embs = embedder.encode(texts, show_progress_bar=False)
-    idx = faiss.IndexFlatL2(len(embs[0]))
+    idx  = faiss.IndexFlatL2(len(embs[0]))
     idx.add(np.array(embs, dtype="float32"))
     _index, _texts, _metas = idx, texts, metas
     return idx, texts, metas
@@ -100,7 +100,7 @@ def build_index():
 # 7) Retrieve
 def retrieve(query, idx, texts, metas, k=5):
     q_emb = embedder.encode([query])
-    _, I = idx.search(np.array(q_emb, dtype="float32"), k)
+    _, I  = idx.search(np.array(q_emb, dtype="float32"), k)
     return [(texts[i], metas[i]) for i in I[0]]
 
 # 8) Generate answer
